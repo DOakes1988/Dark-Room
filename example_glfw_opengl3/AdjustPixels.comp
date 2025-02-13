@@ -1,0 +1,207 @@
+#version 430
+#extension GL_NV_shader_buffer_load : enable
+
+layout (local_size_x = 16, local_size_y = 16) in;
+
+layout (rgba8, binding = 0) uniform image2D img_output;
+layout (rgba8, binding = 1) uniform image2D img_input;
+
+uniform float blackFactor;
+uniform float brightnessFactor;
+uniform float contrastFactor;
+uniform float saturateFactor;
+uniform float shadowFactor;
+uniform float whiteFactor;
+
+uniform float hue_shifts[8];
+uniform float sat_shifts[8];
+uniform float lum_shifts[8];
+uniform float hue_left[8];
+uniform float hue_right[8];
+
+vec3 RGBToHSL(vec3 color)
+{
+    float r = color.r / 255.0, g = color.g / 255.0, b = color.b / 255.0;
+    float max = max(r, max(g, b));
+    float min = min(r, min(g, b));
+
+    float delta = max - min;
+    float lightness = (max + min) / 2.0;
+
+	float hue, saturation;
+	if (delta == 0)
+	{
+		hue = 0;
+		saturation = 0;
+	}
+	else
+	{
+		if (lightness < 0.5)
+		{
+			saturation = delta / (max + min);
+		}
+		else
+		{
+			saturation = delta / (2.0 - max - min);
+		}
+		if (max == r)
+		{
+			hue = mod((g - b) / delta, 6.0);
+		}
+		else if (max == g)
+		{
+			hue = ((b - r) / delta) + 2.0;
+		}
+		else
+		{
+			hue = ((r - g) / delta) + 4.0;
+		}
+		hue /= 6.0;
+	}
+
+	vec3 hsl;
+    hsl.x = hue;
+    hsl.y = saturation;
+    hsl.z = lightness;
+
+    return  hsl;
+}
+
+float hue2rgb(float p, float q, float t)
+{
+    if (t < 0.0) t += 1.0;
+    if (t > 1.0) t -= 1.0;
+    if (t < 1.0 / 6.0) return p + (q - p) * 6.0 * t;
+    if (t < 1.0 / 2.0) return q;
+    if (t < 2.0 / 3.0) return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+    return p;
+}
+
+vec3 HSLToRGB(vec3 hsl)
+{
+    float h = hsl.x, s = hsl.y, l = hsl.z;
+    float r, g, b;
+
+    if (s == 0.0)
+    {
+        r = g = b = l * 255; // achromatic
+    }
+    else
+    {
+        float q = l < 0.5 ? l * (1.0 + s) : l + s - l * s;
+        float p = 2.0 * l - q;
+        r = hue2rgb(p, q, h + 1.0 / 3.0) * 255;
+        g = hue2rgb(p, q, h) * 255;
+        b = hue2rgb(p, q, h - 1.0 / 3.0) * 255;
+    }
+
+    return vec3(r, g, b);
+}
+
+// Calculate Luminance
+float luminance(vec3 color) {
+    return dot(color, vec3(0.299, 0.587, 0.114));
+}
+
+// Function to adjust the luminance with a distribution effect
+vec3 adjustBlackPoint(vec3 color, float factor) {
+    float lum = luminance(color);
+    float adjustment = factor * (1.1 - lum);
+    return color + vec3(adjustment);
+}
+
+vec3 adjustWhitePoint(vec3 color, float factor)
+{
+    float lum = luminance(color);
+    float adjustment = factor * lum;
+    return color + vec3(adjustment);
+}
+
+
+void main()
+{
+    ivec2 pixel_coords = ivec2(gl_GlobalInvocationID.xy);
+    vec4 pixel = imageLoad(img_input, pixel_coords);
+    vec3 hsl = RGBToHSL(pixel.rgb);
+
+    vec3 final_hsl = vec3(0.0);
+    float total_weight = 0.0;
+
+    for (int i = -1; i <= 1; ++i)
+    {
+        for (int j = -1; j <= 1; ++j)
+        {
+            ivec2 offset = pixel_coords + ivec2(i, j);
+            vec4 sample_color = imageLoad(img_input, offset);
+            vec3 sample_hsl = RGBToHSL(sample_color.rgb);
+
+            float weight = 1.0 - (abs(float(i)) + abs(float(j))) / 4.0; // Gaussian-like weight
+            for (int k = 0; k < 8; ++k)
+            {
+                if ((hue_left[k] < hue_right[k] && sample_hsl.x >= hue_left[k] && sample_hsl.x <= hue_right[k]) ||
+                    (hue_left[k] > hue_right[k] && (sample_hsl.x >= hue_left[k] || sample_hsl.x <= hue_right[k])))
+                {
+                    float hue_center = (hue_left[k] + hue_right[k]) / 2.0;
+                    float hue_distance = abs(sample_hsl.x - hue_center) / (hue_right[k] - hue_left[k]);
+                    float hue_weight = 1.0 - hue_distance;
+
+                    float saturation_distance = abs(sample_hsl.y - 0.5);
+                    float saturation_weight = 1.0 - saturation_distance * 2.0;
+
+                    float combined_weight = hue_weight * saturation_weight * weight;
+
+                    sample_hsl.x += (hue_shifts[k] / 360.0) / 100.0 * 25.0;
+                    sample_hsl.y += combined_weight * (sat_shifts[k] / 100.0);
+                    sample_hsl.z += combined_weight * (lum_shifts[k] / 500.0) / 200.0;
+
+                    sample_hsl.x = fract(sample_hsl.x);
+                    sample_hsl.y = clamp(sample_hsl.y, 0.0, 1.0);
+                    sample_hsl.z = clamp(sample_hsl.z, 0.0, 1.0);
+                }
+            }
+
+            final_hsl += sample_hsl * weight;
+            total_weight += weight;
+        }
+    }
+
+    final_hsl /= total_weight;
+
+    vec3 rgb = HSLToRGB(final_hsl);
+    pixel = vec4(rgb, pixel.a);
+   
+    if (blackFactor != 0.0) {
+        pixel.rgb = adjustBlackPoint(pixel.rgb, blackFactor);
+    }
+
+    if (brightnessFactor != 0.0) {
+        pixel.rgb += brightnessFactor;
+    }
+
+    if (contrastFactor != 0.0) {
+        pixel.rgb = (pixel.rgb - 0.5) * contrastFactor + 0.5;
+    }
+
+    if (saturateFactor != 0.0) {
+        float mean = (pixel.r + pixel.g + pixel.b) / 3.0;
+        pixel.rgb = mean + saturateFactor * (pixel.rgb - mean);
+    }
+
+    if (shadowFactor != 0.0)
+    {
+        float threshold = 0.40;
+        for (int i = 0; i < 3; i++)
+        {
+            if (pixel[i] < threshold) {
+                pixel[i] = pixel[i] + (threshold - pixel[i]) * shadowFactor;
+            }
+        }
+    }
+
+    if (whiteFactor != 0.0)
+    {
+        pixel.rgb = adjustWhitePoint(pixel.rgb, whiteFactor);
+    }
+
+    imageStore(img_output, pixel_coords, pixel);
+}

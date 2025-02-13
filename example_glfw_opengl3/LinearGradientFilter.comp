@@ -1,0 +1,276 @@
+#version 430
+#extension GL_NV_shader_buffer_load : enable
+
+layout (local_size_x = 16, local_size_y = 16) in;
+
+layout (rgba8, binding = 0) uniform image2D img_output;
+layout (rgba8, binding = 1) uniform image2D img_input;
+
+uniform float blackFactor;
+uniform float brightnessFactor;
+uniform float contrastFactor;
+uniform float saturateFactor;
+uniform float shadowFactor;
+uniform float whiteFactor;
+
+uniform float FblackFactor;
+uniform float FbrightnessFactor;
+uniform float FcontrastFactor;
+uniform float FsaturateFactor;
+uniform float FshadowFactor;
+uniform float FwhiteFactor;
+
+uniform vec2 line_start;
+uniform vec2 line_end;
+uniform vec2 image_pos;
+uniform vec2 image_size;
+uniform bool apply_above;
+uniform bool linear_gradient_active;
+
+uniform float angle; 
+uniform vec2 center;
+uniform float gradient_intensity;
+
+uniform float hue_shifts[8];
+uniform float sat_shifts[8];
+uniform float lum_shifts[8];
+uniform float hue_left[8];
+uniform float hue_right[8];
+
+vec3 RGBToHSL(vec3 color) {
+    float r = color.r / 255.0, g = color.g / 255.0, b = color.b / 255.0;
+    float max = max(r, max(g, b));
+    float min = min(r, min(g, b));
+
+    float delta = max - min;
+    float lightness = (max + min) / 2.0;
+
+    float hue, saturation;
+    if (delta == 0) {
+        hue = 0;
+        saturation = 0;
+    } else {
+        if (lightness < 0.5) {
+            saturation = delta / (max + min);
+        } else {
+            saturation = delta / (2.0 - max - min);
+        }
+        if (max == r) {
+            hue = mod((g - b) / delta, 6.0);
+        } else if (max == g) {
+            hue = ((b - r) / delta) + 2.0;
+        } else {
+            hue = ((r - g) / delta) + 4.0;
+        }
+        hue /= 6.0;
+    }
+
+    vec3 hsl;
+    hsl.x = hue;
+    hsl.y = saturation;
+    hsl.z = lightness;
+
+    return hsl;
+}
+
+float hue2rgb(float p, float q, float t) {
+    if (t < 0.0) t += 1.0;
+    if (t > 1.0) t -= 1.0;
+    if (t < 1.0 / 6.0) return p + (q - p) * 6.0 * t;
+    if (t < 1.0 / 2.0) return q;
+    if (t < 2.0 / 3.0) return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+    return p;
+}
+
+vec3 HSLToRGB(vec3 hsl) {
+    float h = hsl.x, s = hsl.y, l = hsl.z;
+    float r, g, b;
+
+    if (s == 0.0) {
+        r = g = b = l * 255; // achromatic
+    } else {
+        float q = l < 0.5 ? l * (1.0 + s) : l + s - l * s;
+        float p = 2.0 * l - q;
+        r = hue2rgb(p, q, h + 1.0 / 3.0) * 255;
+        g = hue2rgb(p, q, h) * 255;
+        b = hue2rgb(p, q, h - 1.0 / 3.0) * 255;
+    }
+
+    return vec3(r, g, b);
+}
+
+// Calculate Luminance
+float luminance(vec3 color) {
+    return dot(color, vec3(0.299, 0.587, 0.114));
+}
+
+// Function to adjust the luminance with a distribution effect
+vec3 adjustBlackPoint(vec3 color, float factor) {
+    float lum = luminance(color);
+    float adjustment = factor * (1.1 - lum);
+    return color + vec3(adjustment);
+}
+
+vec3 adjustWhitePoint(vec3 color, float factor) {
+    float lum = luminance(color);
+    float adjustment = factor * lum;
+    return color + vec3(adjustment);
+}
+
+float pointLineDistance(vec2 point, vec2 line_start, vec2 line_end) {
+    float a = line_end.y - line_start.y;
+    float b = line_start.x - line_end.x;
+    float c = line_end.x * line_start.y - line_start.x * line_end.y;
+    return abs(a * point.x + b * point.y + c) / sqrt(a * a + b * b);
+}
+
+float calculateGradientFactor(vec2 coords, vec2 start, vec2 end) {
+    float line_dist = distance(start, end);
+    float pixel_dist = pointLineDistance(coords, start, end);
+    float normalized_dist = pixel_dist / line_dist;
+    return clamp(normalized_dist * gradient_intensity, 0.0, 1.0);
+}
+
+bool isAbove(vec2 pixel_coords, vec2 line_start, vec2 line_end) {
+    float m = (line_end.y - line_start.y) / (line_end.x - line_start.x);
+    float b = line_start.y - m * line_start.x;
+    float y_at_x = m * pixel_coords.x + b;
+    return apply_above ? pixel_coords.y < y_at_x : pixel_coords.y > y_at_x;
+}
+
+void main() {
+    ivec2 pixel_coords = ivec2(gl_GlobalInvocationID.xy);
+    vec4 pixel = imageLoad(img_input, pixel_coords);
+
+    // Convert pixel_coords to the coordinate system of the image
+    vec2 normalized_coords = vec2(pixel_coords) * image_size + image_pos;
+
+    vec3 hsl = RGBToHSL(pixel.rgb);
+
+    vec3 final_hsl = vec3(0.0);
+    float total_weight = 0.0;
+
+    for (int i = -1; i <= 1; ++i) {
+        for (int j = -1; j <= 1; ++j) {
+            ivec2 offset = pixel_coords + ivec2(i, j);
+            vec4 sample_color = imageLoad(img_input, offset);
+            vec3 sample_hsl = RGBToHSL(sample_color.rgb);
+
+            float weight = 1.0 - (abs(float(i)) + abs(float(j))) / 4.0; // Gaussian-like weight
+            for (int k = 0; k < 8; ++k) {
+                if ((hue_left[k] < hue_right[k] && sample_hsl.x >= hue_left[k] && sample_hsl.x <= hue_right[k]) ||
+                    (hue_left[k] > hue_right[k] && (sample_hsl.x >= hue_left[k] || sample_hsl.x <= hue_right[k]))) {
+                    float hue_center = (hue_left[k] + hue_right[k]) / 2.0;
+                    float hue_distance = abs(sample_hsl.x - hue_center) / (hue_right[k] - hue_left[k]);
+                    float hue_weight = 1.0 - hue_distance;
+
+                    float saturation_distance = abs(sample_hsl.y - 0.5);
+                    float saturation_weight = 1.0 - saturation_distance * 2.0;
+
+                    float combined_weight = hue_weight * saturation_weight * weight;
+
+                    sample_hsl.x += (hue_shifts[k] / 360.0) / 100.0 * 25.0;
+                    sample_hsl.y += combined_weight * (sat_shifts[k] / 100.0);
+                    sample_hsl.z += combined_weight * (lum_shifts[k] / 500.0) / 200.0;
+
+                    sample_hsl.x = fract(sample_hsl.x);
+                    sample_hsl.y = clamp(sample_hsl.y, 0.0, 1.0);
+                    sample_hsl.z = clamp(sample_hsl.z, 0.0, 1.0);
+                }
+            }
+
+            final_hsl += sample_hsl * weight;
+            total_weight += weight;
+        }
+    }
+
+    final_hsl /= total_weight;
+
+    vec3 rgb = HSLToRGB(final_hsl);
+    pixel = vec4(rgb, pixel.a);
+
+    // Apply base adjustments
+    if (blackFactor != 0.0) {
+        pixel.rgb = adjustBlackPoint(pixel.rgb, blackFactor);
+    }
+
+    if (brightnessFactor != 0.0) {
+        pixel.rgb += brightnessFactor;
+    }
+
+    if (contrastFactor != 0.0) {
+        pixel.rgb = (pixel.rgb - 0.5) * contrastFactor + 0.5;
+    }
+
+    if (saturateFactor != 0.0) {
+        float mean = (pixel.r + pixel.g + pixel.b) / 3.0;
+        pixel.rgb = mean + saturateFactor * (pixel.rgb - mean);
+    }
+
+    if (shadowFactor != 0.0) {
+        float threshold = 0.40;
+        for (int i = 0; i < 3; i++) {
+            if (pixel[i] < threshold) {
+                pixel[i] = pixel[i] + (threshold - pixel[i]) * shadowFactor;
+            }
+        }
+    }
+
+    if (whiteFactor != 0.0) {
+        pixel.rgb = adjustWhitePoint(pixel.rgb, whiteFactor);
+    }
+
+    // Apply linear gradient adjustments
+    if (linear_gradient_active) {
+        float gradient_factor = calculateGradientFactor(normalized_coords, line_start, line_end);
+
+        //if (apply_above ? (normalized_coords.y <= line_start.y) : (normalized_coords.y >= line_start.y)) {
+       //     gradient_factor = 1.0;
+       // }
+
+        if (gradient_factor > 0.0) {
+            if (isAbove(normalized_coords, line_start, line_end))
+            {
+                // Apply black point adjustment
+                if (FblackFactor != 0.0) {
+                    vec3 gradient_adjustment = adjustBlackPoint(pixel.rgb, FblackFactor);
+                    pixel.rgb = mix(pixel.rgb, gradient_adjustment, gradient_factor);
+                }
+                // Apply brightness adjustment
+                if (FbrightnessFactor != 0.0) {
+                    vec3 gradient_adjustment = pixel.rgb + FbrightnessFactor;
+                    pixel.rgb = mix(pixel.rgb, gradient_adjustment, gradient_factor);
+                }
+                // Apply contrast adjustment
+                if (FcontrastFactor != 0.0) {
+                    vec3 gradient_adjustment = (pixel.rgb - 0.5) * FcontrastFactor + 0.5;
+                    pixel.rgb = mix(pixel.rgb, gradient_adjustment, gradient_factor);
+                }
+                // Apply saturation adjustment
+                if (FsaturateFactor != 0.0) {
+                    float mean = (pixel.r + pixel.g + pixel.b) / 3.0;
+                    vec3 gradient_adjustment = mean + FsaturateFactor * (pixel.rgb - mean);
+                    pixel.rgb = mix(pixel.rgb, gradient_adjustment, gradient_factor);
+                }
+                // Apply shadow adjustment
+                if (FshadowFactor != 0.0) {
+                    float threshold = 0.40;
+                    vec3 gradient_adjustment = pixel.rgb;
+                    for (int i = 0; i < 3; i++) {
+                        if (gradient_adjustment[i] < threshold) {
+                            gradient_adjustment[i] = gradient_adjustment[i] + (threshold - gradient_adjustment[i]) * FshadowFactor;
+                        }
+                    }
+                    pixel.rgb = mix(pixel.rgb, gradient_adjustment, gradient_factor);
+                }
+                // Apply white point adjustment
+                if (FwhiteFactor != 0.0) {
+                    vec3 gradient_adjustment = adjustWhitePoint(pixel.rgb, FwhiteFactor);
+                    pixel.rgb = mix(pixel.rgb, gradient_adjustment, gradient_factor);
+                }
+            }
+        }
+    }
+
+    imageStore(img_output, pixel_coords, pixel);
+}

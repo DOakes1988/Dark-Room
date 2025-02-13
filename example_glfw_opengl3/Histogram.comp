@@ -1,0 +1,33 @@
+#version 430
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// Image input
+layout(binding = 0) uniform sampler2D image;
+
+// Histogram output
+layout(std430, binding = 1) buffer Histograms {
+    uint hist_luminance[256];
+    uint hist_red[256];
+    uint hist_green[256];
+    uint hist_blue[256];
+};
+
+void main() {
+    ivec2 img_size = textureSize(image, 0);
+    ivec2 pixel_coords = ivec2(gl_GlobalInvocationID.xy);
+
+    if (pixel_coords.x < img_size.x && pixel_coords.y < img_size.y) {
+        vec4 pixel = texelFetch(image, pixel_coords, 0);
+
+        uint r = uint(pixel.r * 255.0);
+        uint g = uint(pixel.g * 255.0);
+        uint b = uint(pixel.b * 255.0);
+        uint lum = uint(0.299 * float(r) + 0.587 * float(g) + 0.114 * float(b));
+
+        atomicAdd(hist_luminance[lum], 1);
+        atomicAdd(hist_red[r], 1);
+        atomicAdd(hist_green[g], 1);
+        atomicAdd(hist_blue[b], 1);
+    }
+}

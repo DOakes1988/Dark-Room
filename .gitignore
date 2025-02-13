@@ -1,0 +1,15 @@
+# Ignore Visual Studio files
+.vs/
+*.suo
+*.user
+*.VC.db
+*.VC.opendb
+
+# Ignore build files
+Debug/
+Release/
+*.obj
+*.exe
+*.dll
+*.lib
+*.pdb
