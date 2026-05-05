@@ -14,6 +14,7 @@ C++ photo editing application utilizing GPU-accelerated image processing with co
 ## Tech Stack
 - C++
 - OpenGL / graphics pipeline tools
+- IMGUI for user interface
 - GPU compute shaders
 
 ## Status
@@ -26,3 +27,6 @@ In progress — core features are functional, with additional cleanup, features,
 - linear gradient filter
 - circular gradient filter
 - documentation improvements
+
+## Screenshot
+![User Interface](screenshots/ui.png)
