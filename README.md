@@ -1,7 +1,7 @@
 # Dark Room - Photo Editing Program
 
 ## Overview
-C++ photo editing application utilizing GPU-accelerated image processing with compute shaders. 
+Photo editing application utilizing compute shaders for GPU-accelerated image processing.
 
 ## Current Features
 - GPU-accelerated image processing
@@ -13,9 +13,10 @@ C++ photo editing application utilizing GPU-accelerated image processing with co
 
 ## Tech Stack
 - C++
+- C
+- JavaScript
 - OpenGL / graphics pipeline tools
 - IMGUI for user interface
-- GPU compute shaders
 
 ## Status
 In progress — core features are functional, with additional cleanup, features, and polish planned. 
