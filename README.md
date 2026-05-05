@@ -30,4 +30,4 @@ In progress — core features are functional, with additional cleanup, features,
 - documentation improvements
 
 ## Screenshot
-![User Interface](screenshots/ui.png)
+![User Interface](ui.png)
